@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16.4
+    restart: always
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_MULTIPLE_DATABASES: "keycloak,example_db_for_service"
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # Redis Cache
+  redis:
+    image: redis:7.4-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+
+  # MinIO Object Storage
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/var/lib/minio/data
+    environment:
+      MINIO_ROOT_USER: minio-root-user
+      MINIO_ROOT_PASSWORD: minio-root-password
+      MINIO_REGION: ru-central1
+      MINIO_CONSOLE_PORT: 9001
+    command: ["server", "/var/lib/minio/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 5s
+
+  # Vault Secret Management
+  vault:
+    image: vault:1.13.3
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: vault-root-token
+      VAULT_ADDR: http://0.0.0.0:8200
+      VAULT_API_ADDR: http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--proxy", "off", "http://0.0.0.0:8200/v1/sys/health?standbyok=true"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # Vault Initialization
+  vault-init:
+    image: vault:1.13.3
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: vault-root-token
+      VAULT_NAMESPACE: project_namespace
+      VAULT_ADDR: http://vault:8200
+    restart: "no"
+    command: |
+      sh -c "
+        echo 'Waiting for Vault to be ready...'
+        sleep 10
+        echo 'Vault is ready, performing initialization...'
+        vault auth -method=token token=vault-root-token
+        vault secrets enable -path=secret kv
+        echo 'Vault initialization completed'
+      "
+
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: rabbitmq:3.10.7-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=rmuser
+      - RABBITMQ_DEFAULT_PASS=rmpassword
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  rabbitmq-data:
+
+networks:
+  default:
+    driver: bridge
